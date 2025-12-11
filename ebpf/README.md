@@ -24,3 +24,10 @@ ARCH=arm64 ./gen_bpf.sh
 - `tcp_connect_bpfeb.go` : 빅 엔디안용 Go 바인딩 (포터빌리티용)
 
 > macOS 등 비-Linux 환경에서는 스크립트 실행이 실패합니다. 실제 대상 클러스터 노드(또는 같은 커널 버전의 Linux VM/컨테이너)에서 실행하세요.
+
+### 패키지명 제어
+- 기본 Go 패키지명은 `ebpf`입니다.
+- 변경하려면 `GOPACKAGE=<원하는패키지>` 환경변수로 실행하세요.
+  ```bash
+  GOPACKAGE=agentebpf ARCH=arm64 ./gen_bpf.sh
+  ```

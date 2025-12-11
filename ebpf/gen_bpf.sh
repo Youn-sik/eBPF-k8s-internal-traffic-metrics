@@ -15,6 +15,7 @@
 set -euo pipefail
 
 ARCH="${ARCH:-x86}"
+PKG="${GOPACKAGE:-ebpf}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This script must run on Linux with BTF-enabled kernel." >&2
@@ -39,8 +40,8 @@ if ! command -v bpf2go >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[2/2] Running bpf2go (arch=${ARCH})..."
-bpf2go -cc clang -target bpfel -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
-bpf2go -cc clang -target bpfeb -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
+echo "[2/2] Running bpf2go (arch=${ARCH}, pkg=${PKG})..."
+bpf2go -cc clang -target bpfel -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
+bpf2go -cc clang -target bpfeb -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
 
 echo "Done. Generated tcp_connect_bpfel.go / tcp_connect_bpfeb.go and vmlinux.h under $(dirname "$0")."
