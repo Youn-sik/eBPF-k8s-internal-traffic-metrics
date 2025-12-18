@@ -8,6 +8,7 @@ import (
 	"net"             // IP 타입 변환
 	"os"              // 환경변수 읽기
 	"os/signal"       // OS 시그널 수신
+	"path/filepath"   // kubeconfig 경로 결합
 	"strconv"         // 문자열 숫자 변환
 	"syscall"         // 시그널 상수 제공
 	"time"            // TTL 파싱
@@ -34,6 +35,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM) // SIGINT/SIGTERM 수신 컨텍스트
 	defer stop()                                                                             // 시그널 리스너 정리
 
+	mode := os.Getenv("MODE") // cluster | local
+	if mode == "" {
+		mode = "cluster"
+	}
+
 	mapperOpts := k8smapper.Options{ // 매퍼 옵션 구성
 		Namespace: os.Getenv("WATCH_NAMESPACE"), // 감시 네임스페이스(없으면 전체)
 	}
@@ -57,7 +63,13 @@ func main() {
 		log.Fatalf("failed to create mapper: %v", err)
 	}
 	go func() { // 매퍼 실행 고루틴
-		if runErr := mapper.Run(ctx, mapperOpts); runErr != nil {
+		var kubeconfigPath string
+		if mode == "local" { // 로컬 테스트 시 kubeconfig 사용
+			if home, herr := os.UserHomeDir(); herr == nil {
+				kubeconfigPath = filepath.Join(home, ".kube", "config")
+			}
+		}
+		if runErr := mapper.Run(ctx, mapperOpts, kubeconfigPath); runErr != nil {
 			log.Fatalf("mapper run failed: %v", runErr)
 		}
 	}()

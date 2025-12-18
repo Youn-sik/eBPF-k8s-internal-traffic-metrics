@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"         // 클라이언트셋
 	"k8s.io/client-go/rest"               // in-cluster 설정
 	"k8s.io/client-go/tools/cache"        // 리소스 이벤트 핸들러/캐시
+	"k8s.io/client-go/tools/clientcmd"    // kubeconfig 로더
 )
 
 type ServiceMeta struct {
@@ -63,10 +64,18 @@ func NewMapper(opts Options) (*Mapper, error) {
 	}, nil
 }
 
-func (m *Mapper) Run(ctx context.Context, opts Options) error {
-	cfg, err := rest.InClusterConfig() // 클러스터 내부 설정 로드
-	if err != nil {                    // 실패 시 에러 반환
-		return err
+func (m *Mapper) Run(ctx context.Context, opts Options, kubeconfigPath string) error {
+	var (
+		cfg *rest.Config
+		err error
+	)
+	if kubeconfigPath != "" { // 로컬 kubeconfig 우선
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	} else { // 없으면 in-cluster
+		cfg, err = rest.InClusterConfig()
+	}
+	if err != nil {
+		return err // 설정 로드 실패
 	}
 	clientset, err := kubernetes.NewForConfig(cfg) // 클라이언트셋 생성
 	if err != nil {                                // 실패 시 에러 반환
