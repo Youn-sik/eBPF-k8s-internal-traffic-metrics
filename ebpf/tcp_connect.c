@@ -30,7 +30,7 @@ struct {
 SEC("kprobe/tcp_v4_connect")
 int BPF_KPROBE(tcp_v4_connect_enter, struct sock *sk, struct sockaddr *uaddr)
 {
-    __u32 daddr;
+    __u32 daddr = 0; // 초기화하지 않으면 verifier가 !read_ok로 거부
     struct event *e;
     struct ipv4_sockaddr sa = {};
 
