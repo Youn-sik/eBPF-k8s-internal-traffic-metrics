@@ -15,6 +15,18 @@
 set -euo pipefail
 
 ARCH="${ARCH:-x86}"
+# bpf2go/clang가 기대하는 __TARGET_ARCH_* 값으로 매핑
+case "${ARCH}" in
+  x86_64|amd64)
+    TARGET_ARCH="x86"
+    ;;
+  arm64|aarch64)
+    TARGET_ARCH="arm64"
+    ;;
+  *)
+    TARGET_ARCH="${ARCH}"
+    ;;
+esac
 PKG="${GOPACKAGE:-ebpf}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -40,8 +52,8 @@ if ! command -v bpf2go >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[2/2] Running bpf2go (arch=${ARCH}, pkg=${PKG})..."
-bpf2go -cc clang -target bpfel -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
-bpf2go -cc clang -target bpfeb -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
+echo "[2/2] Running bpf2go (arch=${ARCH} -> __TARGET_ARCH_${TARGET_ARCH}, pkg=${PKG})..."
+bpf2go -cc clang -target bpfel -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${TARGET_ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
+bpf2go -cc clang -target bpfeb -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${TARGET_ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
 
 echo "Done. Generated tcp_connect_bpfel.go / tcp_connect_bpfeb.go and vmlinux.h under $(dirname "$0")."
