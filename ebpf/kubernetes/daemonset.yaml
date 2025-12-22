@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: skuber-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: internal-tcp-watcher
+  namespace: skuber-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: internal-tcp-watcher
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: internal-tcp-watcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: internal-tcp-watcher
+subjects:
+  - kind: ServiceAccount
+    name: internal-tcp-watcher
+    namespace: skuber-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: internal-tcp-watcher
+  namespace: skuber-system
+  labels:
+    app: internal-tcp-watcher
+spec:
+  selector:
+    matchLabels:
+      app: internal-tcp-watcher
+  template:
+    metadata:
+      labels:
+        app: internal-tcp-watcher
+    spec:
+      serviceAccountName: internal-tcp-watcher
+      hostNetwork: true
+      hostPID: true
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: agent
+          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.01
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: MODE
+              value: "cluster"
+            - name: WATCH_NAMESPACE
+              value: ""
+            - name: MAPPER_TTL
+              value: "60s"
+            - name: MAPPER_CAPACITY
+              value: "2048"
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: modules
+              mountPath: /lib/modules
+            - name: sys
+              mountPath: /sys
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
