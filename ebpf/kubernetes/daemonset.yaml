@@ -1,9 +1,4 @@
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: skuber-system
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: internal-tcp-watcher
