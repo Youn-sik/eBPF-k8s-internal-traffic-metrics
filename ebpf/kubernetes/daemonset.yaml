@@ -56,7 +56,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: agent
-          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.01
+          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.02
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

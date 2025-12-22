@@ -40,6 +40,14 @@
 
 ---
 
+## 메트릭 사용법
+- 기본 주소: `METRICS_ADDR` (기본값 `0.0.0.0:8080`).
+- 카운터: `internal_tcp_attempts_total{destination_namespace, destination_service, destination_pod}`.
+- 동작: ringbuf 이벤트의 목적지 IP를 K8s Service/Endpoint 매핑과 대조해 매핑 성공 시에만 카운터 증가.
+- 확인: `curl -s http://localhost:8080/metrics | grep internal_tcp_attempts_total`.
+
+---
+
 ## 왜 가볍고 확실한가
 
 - 가벼움: L4 IP만 확인해 CPU/메모리 사용이 매우 적음(약 20MB 예상).

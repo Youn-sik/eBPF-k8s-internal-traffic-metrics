@@ -14,17 +14,34 @@
 
 set -euo pipefail
 
-ARCH="${ARCH:-x86}"
+ARCH_INPUT="${ARCH:-}"
+if [[ -z "${ARCH_INPUT}" ]]; then
+  ARCH_INPUT="$(uname -m)"
+fi
+
+# 아티팩트 디렉터리명
+case "${ARCH_INPUT}" in
+  x86_64|amd64|x86|i386|i686)
+    ARTIFACT_ARCH="amd64"
+    ;;
+  arm64|aarch64)
+    ARTIFACT_ARCH="arm64"
+    ;;
+  *)
+    ARTIFACT_ARCH="${ARCH_INPUT}"
+    ;;
+esac
+
 # bpf2go/clang가 기대하는 __TARGET_ARCH_* 값으로 매핑
-case "${ARCH}" in
-  x86_64|amd64)
+case "${ARCH_INPUT}" in
+  x86_64|amd64|x86|i386|i686)
     TARGET_ARCH="x86"
     ;;
   arm64|aarch64)
     TARGET_ARCH="arm64"
     ;;
   *)
-    TARGET_ARCH="${ARCH}"
+    TARGET_ARCH="${ARCH_INPUT}"
     ;;
 esac
 PKG="${GOPACKAGE:-ebpf}"
@@ -52,8 +69,16 @@ if ! command -v bpf2go >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[2/2] Running bpf2go (arch=${ARCH} -> __TARGET_ARCH_${TARGET_ARCH}, pkg=${PKG})..."
+echo "[2/2] Running bpf2go (arch=${ARCH_INPUT} -> __TARGET_ARCH_${TARGET_ARCH}, pkg=${PKG})..."
 bpf2go -cc clang -target bpfel -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${TARGET_ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
 bpf2go -cc clang -target bpfeb -go-package "${PKG}" -cflags "-g -O2 -D__TARGET_ARCH_${TARGET_ARCH}" TcpConnect tcp_connect.c -- -I"$(dirname "$0")"
+
+# 아티팩트 디렉터리에 결과물 복사
+ART_DIR="$(dirname "$0")/artifacts/${ARTIFACT_ARCH}"
+mkdir -p "${ART_DIR}"
+rm -f "${ART_DIR}/tcpconnect_bpfel.go" "${ART_DIR}/tcpconnect_bpfeb.go" "${ART_DIR}/tcpconnect_bpfel.o" "${ART_DIR}/tcpconnect_bpfeb.o" "${ART_DIR}/vmlinux.h"
+cp "$(dirname "$0")"/vmlinux.h "${ART_DIR}/"
+cp "$(dirname "$0")"/tcpconnect_bpfel.go "$(dirname "$0")"/tcpconnect_bpfeb.go "${ART_DIR}/"
+cp "$(dirname "$0")"/tcpconnect_bpfel.o "$(dirname "$0")"/tcpconnect_bpfeb.o "${ART_DIR}/"
 
 echo "Done. Generated tcp_connect_bpfel.go / tcp_connect_bpfeb.go and vmlinux.h under $(dirname "$0")."
