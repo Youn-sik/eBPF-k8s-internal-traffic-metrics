@@ -69,6 +69,8 @@ spec:
               value: "60s"
             - name: MAPPER_CAPACITY
               value: "2048"
+            - name: METRICS_ADDR
+              value: ""
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf

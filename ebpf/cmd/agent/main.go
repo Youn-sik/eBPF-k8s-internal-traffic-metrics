@@ -9,6 +9,7 @@ import (
 	"os"              // 환경변수 읽기
 	"os/signal"       // OS 시그널 수신
 	"path/filepath"   // kubeconfig 경로 결합
+	"net/http"        // 메트릭 HTTP 서버
 	"strconv"         // 문자열 숫자 변환
 	"syscall"         // 시그널 상수 제공
 	"time"            // TTL 파싱
@@ -19,6 +20,8 @@ import (
 	"github.com/cilium/ebpf/link"    // eBPF 프로그램을 커널의 특정 훅에 연결하고 연결을 관리하는 패키지
 	"github.com/cilium/ebpf/ringbuf" // eBPF 프로그램이 커널에서 발생시킨 이벤트를 User Space 에서 비동기적으로 수신하는 통로
 	"github.com/cilium/ebpf/rlimit"  // eBPF 프로그램 로딩에 필요한 시스템 자원 제한을 자동으로 설정하는 유틸리티
+	"github.com/prometheus/client_golang/prometheus"      // 메트릭 등록
+	"github.com/prometheus/client_golang/prometheus/promhttp" // /metrics 핸들러
 
 	"ebpf-k8s-internal-traffic-metrics/internal/k8smapper" // K8s 매핑
 )
@@ -62,6 +65,41 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create mapper: %v", err)
 	}
+
+	// 메트릭 설정
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = "0.0.0.0:8080"
+	}
+	counter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "internal_tcp_attempts_total",
+			Help: "Count of internal TCP connect attempts mapped to K8s Services/Pods",
+		},
+		[]string{"destination_namespace", "destination_service", "destination_pod"},
+	)
+	if err := prometheus.Register(counter); err != nil {
+		// 이미 등록되어 있어도 계속 진행
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			counter = are.ExistingCollector.(*prometheus.CounterVec)
+		} else {
+			log.Fatalf("failed to register metrics: %v", err)
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	srv := &http.Server{
+		Addr:    metricsAddr,
+		Handler: mux,
+	}
+	go func() {
+		log.Printf("metrics server listening on %s", metricsAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("metrics server failed: %v", err)
+		}
+	}()
+
 	go func() { // 매퍼 실행 고루틴
 		var kubeconfigPath string
 		if mode == "local" { // 로컬 테스트 시 kubeconfig 사용
@@ -101,6 +139,9 @@ func main() {
 	go func() { // 종료 시 읽기 차단 해제용 고루틴
 		<-ctx.Done() // 시그널 대기
 		rd.Close()   // 리더 닫아 Read 해제
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	for {
@@ -125,7 +166,20 @@ func main() {
 		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
 
 		if meta, ok := mapper.Lookup(ip.String()); ok { // 매핑 성공 시 메타 포함
-			log.Printf("tcp connect dest=%s ns=%s svc=%s pod=%s", ip.String(), meta.Namespace, meta.Service, meta.Pod)
+			ns := meta.Namespace
+			svc := meta.Service
+			pod := meta.Pod
+			if ns == "" {
+				ns = "unknown"
+			}
+			if svc == "" {
+				svc = "unknown"
+			}
+			if pod == "" {
+				pod = "unknown"
+			}
+			counter.WithLabelValues(ns, svc, pod).Inc()
+			log.Printf("tcp connect dest=%s ns=%s svc=%s pod=%s", ip.String(), ns, svc, pod)
 		} else {
 			log.Printf("tcp connect dest=%s (unmapped)", ip.String()) // 매핑 실패 로그
 		}
