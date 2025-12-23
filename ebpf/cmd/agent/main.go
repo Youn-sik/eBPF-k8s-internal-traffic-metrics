@@ -1,6 +1,7 @@
 package main // 메인 실행 진입점 패키지
 
 import (
+	"bytes"           // comm 디코딩
 	"context"         // 종료 제어용 컨텍스트
 	"encoding/binary" // 바이트 오더 변환
 	"errors"          // 에러 비교 유틸
@@ -11,6 +12,7 @@ import (
 	"os/signal"       // OS 시그널 수신
 	"path/filepath"   // kubeconfig 경로 결합
 	"strconv"         // 문자열 숫자 변환
+	"strings"         // 필터 파싱
 	"syscall"         // 시그널 상수 제공
 	"time"            // TTL 파싱
 
@@ -27,10 +29,11 @@ import (
 )
 
 type event struct {
-	Daddr uint32 // 목적지 IPv4 (네트워크 바이트 오더)
+	Daddr uint32   // 목적지 IPv4 (네트워크 바이트 오더)
+	Comm  [16]byte // 프로세스 comm
 }
 
-const eventSize = 4 // 이벤트 페이로드 크기
+const eventSize = 20 // 이벤트 페이로드 크기
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // 로그에 날짜+마이크로초 포함
@@ -144,6 +147,8 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
+	filterCfg := loadFilterConfig()
+
 	for {
 		record, err := rd.Read() // 링버퍼에서 이벤트 읽기
 		if err != nil {          // 읽기 실패 처리
@@ -160,10 +165,18 @@ func main() {
 			continue                                                                                               // 다음 이벤트
 		}
 
-		addr := binary.BigEndian.Uint32(record.RawSample[:eventSize]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
+		raw := record.RawSample
+		addr := binary.BigEndian.Uint32(raw[0:4]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
+		comm := strings.TrimRight(string(bytes.Trim(raw[4:20], "\x00")), "\x00")
 
 		ip := make(net.IP, net.IPv4len)      // IPv4 버퍼 생성
 		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
+
+		// 필터링: comm
+		if _, ok := filterCfg.excludeComms[strings.ToLower(comm)]; ok {
+			log.Printf("tcp connect filtered (comm excluded) dest=%s comm=%s", ip.String(), comm)
+			continue
+		}
 
 		if meta, ok := mapper.Lookup(ip.String()); ok { // 매핑 성공 시 메타 포함
 			ns := meta.Namespace
@@ -178,10 +191,40 @@ func main() {
 			if pod == "" {
 				pod = "unknown"
 			}
+
 			counter.WithLabelValues(ns, svc, pod).Inc()
-			log.Printf("tcp connect dest=%s ns=%s svc=%s pod=%s", ip.String(), ns, svc, pod)
+			log.Printf("tcp connect dest=%s ns=%s svc=%s pod=%s comm=%s", ip.String(), ns, svc, pod, comm)
 		} else {
-			log.Printf("tcp connect dest=%s (unmapped)", ip.String()) // 매핑 실패 로그
+			log.Printf("tcp connect dest=%s (unmapped) comm=%s", ip.String(), comm) // 매핑 실패 로그
 		}
+	}
+}
+
+type filterConfig struct {
+	excludeComms map[string]struct{}
+}
+
+func loadFilterConfig() filterConfig {
+	cfg := filterConfig{
+		excludeComms: make(map[string]struct{}),
+	}
+
+	// 기본 kubelet 제외
+	cfg.excludeComms["kubelet"] = struct{}{}
+
+	appendStringSet(os.Getenv("EXCLUDE_COMMS"), func(s string) {
+		cfg.excludeComms[strings.ToLower(s)] = struct{}{}
+	})
+
+	return cfg
+}
+
+func appendStringSet(raw string, add func(string)) {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		add(part)
 	}
 }

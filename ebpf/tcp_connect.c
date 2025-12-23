@@ -19,7 +19,8 @@ struct ipv4_sockaddr {
 };
 
 struct event {
-    __u32 daddr; // Destination IPv4 (network byte order) -> convert in Go using binary.BigEndian
+    __u32 daddr; // Destination IPv4 (network byte order)
+    char comm[16];
 };
 
 struct {
@@ -35,8 +36,9 @@ int BPF_KPROBE(tcp_v4_connect_enter, struct sock *sk, struct sockaddr *uaddr)
     struct ipv4_sockaddr sa = {};
 
     /* 1) 소켓에 기록된 목적지가 있으면 우선 사용한다. */
-    if (sk)
+    if (sk) {
         daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    }
 
     /* 2) 비어 있으면 호출자가 넘긴 sockaddr에서 읽어본다. */
     if (!daddr && uaddr) {
@@ -53,6 +55,7 @@ int BPF_KPROBE(tcp_v4_connect_enter, struct sock *sk, struct sockaddr *uaddr)
         return 0;
 
     e->daddr = daddr;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     bpf_ringbuf_submit(e, 0);
     return 0;
