@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tcp-connect-sample
+  namespace: default
+  labels:
+    app: tcp-connect-sample
+spec:
+  restartPolicy: Never
+  containers:
+    - name: pinger
+      image: busybox:1.36
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting tcp connect loop to vmagent-vmagent (ClusterIP 172.20.230.242:8429)"
+          while true; do
+            # -z: just probe, -w1: 1s timeout
+            nc -z -w1 172.20.230.242 8429 && echo "ok $(date)"
+            sleep 2
+          done
