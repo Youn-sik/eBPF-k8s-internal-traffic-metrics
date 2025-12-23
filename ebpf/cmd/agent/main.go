@@ -174,7 +174,7 @@ func main() {
 
 		// 필터링: comm
 		if _, ok := filterCfg.excludeComms[strings.ToLower(comm)]; ok {
-			log.Printf("tcp connect filtered (comm excluded) dest=%s comm=%s", ip.String(), comm)
+			log.Printf("[FILTERED] tcp connect dest=%s comm=%s", ip.String(), comm)
 			continue
 		}
 
@@ -193,9 +193,9 @@ func main() {
 			}
 
 			counter.WithLabelValues(ns, svc, pod).Inc()
-			log.Printf("tcp connect dest=%s ns=%s svc=%s pod=%s comm=%s", ip.String(), ns, svc, pod, comm)
+			log.Printf("[COUNTED] tcp connect dest=%s ns=%s svc=%s pod=%s comm=%s", ip.String(), ns, svc, pod, comm)
 		} else {
-			log.Printf("tcp connect dest=%s (unmapped) comm=%s", ip.String(), comm) // 매핑 실패 로그
+			log.Printf("[UNMAPPED] tcp connect dest=%s comm=%s", ip.String(), comm) // 매핑 실패 로그
 		}
 	}
 }
