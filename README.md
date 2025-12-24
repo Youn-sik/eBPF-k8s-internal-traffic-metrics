@@ -1,57 +1,72 @@
 ## internal-tcp-watcher: 내부 트래픽 감지 파이프라인
 
-**목표:** 파드가 0개일 때도 내부 TCP 연결 시도를 놓치지 않고 포착해 KEDA로 스케일 신호를 보내는 초경량 에이전트.
+**목표:** 파드가 0개일 때도 내부 TCP connect 시도를 놓치지 않고 포착해 KEDA로 스케일 신호를 보내는 초경량 에이전트.
 
 ---
 
 ## 전체 흐름 (L4 TCP 기준)
 
 1) **사전 준비 — Mapping (Go)**
-- 역할: 어떤 IP가 어떤 Service인지 미리 학습.
-- 동작: Go 에이전트가 Kubernetes API를 지속 감시해 새 Service와 ClusterIP를 메모리 맵에 기록.
-
+   - K8s API(Services/EndpointSlices)를 감시해 ClusterIP/PodIP를 매핑 테이블에 저장.
 2) **연결 포착 — Interception (C/eBPF)**
-- 상황: Service A(Client) -> Service B(Server, 파드 0개) 호출.
-- 동작: `tcp_v4_connect` 진입 시 eBPF Kprobe가 목적지 IP를 캡처하고 RingBuffer로 Go 에이전트에 전달.
-
+   - `kprobe/tcp_v4_connect`에서 목적지 IP와 comm(프로세스명)을 ringbuf로 전달.
 3) **메트릭 변환 — Translation (Go)**
-- 역할: 캡처한 IP를 서비스 이름으로 매핑 후 메트릭화.
-- 동작: RingBuffer에서 IP를 읽고 메모리 맵으로 식별 후 Prometheus 카운터 증가:
-  `internal_tcp_attempts_total{service="my-backend"} += 1`
+   - ringbuf 이벤트를 매핑 테이블로 식별해 Prometheus 카운터 증가:
+     ```
+     internal_tcp_attempts_total{
+       destination_namespace,
+       destination_service,
+       destination_pod,
+       process_comm
+     } += 1
+     ```
+   - 기본 필터: `EXCLUDE_COMMS=kubelet`로 kubelet 헬스체크는 카운트/로그에서 제외(필터 로그는 남김).
+4) **스케일 트리거 — Triggering (VM Agent + KEDA)**
+   - VM Agent가 `/metrics`를 스크레이프.
+   - KEDA가 `sum(rate(internal_tcp_attempts_total{...}[1m]))` 등으로 증가율을 감지해 `0 -> 1` 스케일.
 
-4) **스케일 트리거 — Triggering (Victoria Metrics Agent + KEDA)**
-- VM Single이 `/metrics`를 15초마다 스크랩 후 DB에 저장.
-- KEDA가 쿼리:
-  ```promql
-  rate(internal_tcp_attempts_total{service="my-backend"}[1m])
-  ```
-- 증가가 감지되면 KEDA가 `my-backend` 파드를 `0 -> 1`로 스케일.
+---
+
+## 왜 0 파드에서도 감지 가능한가?
+- 호출이 ClusterIP로 들어오면, 파드가 없더라도 커널의 `tcp_v4_connect` 진입부에서 목적지 IP를 포착한다.
+- eBPF가 ringbuf로 이벤트를 올리고, 매핑 테이블이 Service/ClusterIP를 알고 있으므로 시계열은 살아 있다.
+- 파드가 0이어도 메트릭 시계열은 유지되고, rate/increase로 “최근 증가”만 트리거에 사용한다.
+
+### 한계
+- Headless/Pod IP 직접 호출: 파드가 0이면 IP가 없으므로 감지 불가(ClusterIP 경로로 유도 필요).
+- 외부 트래픽: ingress/L7 레이어에서 별도 메트릭 사용(node-exporter/kube-state-metrics/ingress controller).
 
 ---
 
 ## 기술 스택과 역할
 
-| 구성 요소 | 기술 스택 | 핵심 역할 | 비유 |
-| --- | --- | --- | --- |
-| 커널 감시자 | C + eBPF | TCP connect 시 목적지 IP 캡처 | CCTV (차량 번호판 촬영) |
-| 통역사 | Go (User Space) | IP를 K8s Service로 변환, 메트릭 노출 | 관제 센터 (번호판 조회) |
-| 저장소 | VM Single | 메트릭 수집·Rate 계산 제공 | 기록 보관소 |
-| 실행자 | KEDA | 메트릭을 보고 파드 기동 | 현장 출동팀 |
+| 구성 요소 | 기술 스택 | 핵심 역할 |
+| --- | --- | --- |
+| 커널 감시자 | C + eBPF | `tcp_v4_connect`에서 목적지 IP+comm 캡처 |
+| 통역사 | Go (User Space) | IP→Service 매핑, 필터 적용, /metrics 노출 |
+| 저장소 | VictoriaMetrics/Prometheus | 메트릭 수집·rate 계산 |
+| 실행자 | KEDA | 메트릭 증가율을 보고 파드 기동 |
 
 ---
 
 ## 메트릭 사용법
-- 기본 주소: `METRICS_ADDR` (기본값 `0.0.0.0:9102`).
-- 카운터: `internal_tcp_attempts_total{destination_namespace, destination_service, destination_pod}`.
-- 동작: ringbuf 이벤트의 목적지 IP를 K8s Service/Endpoint 매핑과 대조해 매핑 성공 시에만 카운터 증가.
-- 확인: `curl -s http://localhost:8080/metrics | grep internal_tcp_attempts_total`.
+- 기본 주소: `METRICS_ADDR` (기본 `0.0.0.0:9102`, hostNetwork DaemonSet).
+- 카운터: `internal_tcp_attempts_total{destination_namespace, destination_service, destination_pod, process_comm}`.
+- 필터: `EXCLUDE_COMMS`(기본 kubelet) 환경변수로 comm 기반 제외.
+- 확인 예: `curl -s http://<nodeIP>:9102/metrics | grep internal_tcp_attempts_total`.
+- KEDA 예시: `sum(rate(internal_tcp_attempts_total{destination_namespace="default",destination_service="my-svc"}[1m]))`.
 
 ---
 
-## 왜 가볍고 확실한가
+## 배포/테스트
+- DaemonSet: `ebpf/kubernetes/daemonset.yaml` (hostNetwork, METRICS_ADDR=0.0.0.0:9102).
+- 샘플 트래픽: `ebpf/kubernetes/sample-tcp-client.yaml` (ClusterIP 172.20.230.242:8429로 nc -z 반복).
 
-- 가벼움: L4 IP만 확인해 CPU/메모리 사용이 매우 적음(약 20MB 예상).
-- 확실함: 파드가 0개라 패킷이 Drop돼도 커널 함수 진입부에서 100% 포착.
-- 독립성: 무거운 사이드카 없이 이 기능만 수행하는 전용 에이전트.
+---
 
-이 구성을 통해 **초경량 에이전트 → VM Single → KEDA**로 이어지는 내부 트래픽 감지 파이프라인을 완성합니다.
+## 운영 시 유의사항
+- Counter는 float64로 오버플로우 걱정은 사실상 없음. 시계열 폭증을 막으려면 라벨 조합을 관리하고 필요 시 relabel_drop 고려.
+- comm 필터는 기본 kubelet 제외. 추가 제외는 `EXCLUDE_COMMS`로 설정.
+- 새 eBPF 필드 추가 시 `gen_bpf.sh` 실행 후 `artifacts/<arch>/` 산출물을 갱신해야 한다.
+
+이 구성을 통해 **L4 eBPF 에이전트 → VM/Prometheus → KEDA**로 이어지는 내부 트래픽 감지 파이프라인을 완성합니다.
