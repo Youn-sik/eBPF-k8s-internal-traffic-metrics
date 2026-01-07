@@ -149,6 +149,13 @@ func main() {
 
 	filterCfg := loadFilterConfig()
 
+	// 필터 설정 로그 출력
+	excludeCommsList := make([]string, 0, len(filterCfg.excludeComms))
+	for k := range filterCfg.excludeComms {
+		excludeCommsList = append(excludeCommsList, k)
+	}
+	log.Printf("[CONFIG] excludeComms=%v (count=%d)", excludeCommsList, len(excludeCommsList))
+
 	for {
 		record, err := rd.Read() // 링버퍼에서 이벤트 읽기
 		if err != nil {          // 읽기 실패 처리
@@ -173,8 +180,9 @@ func main() {
 		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
 
 		// 필터링: comm
-		if _, ok := filterCfg.excludeComms[strings.ToLower(comm)]; ok {
-			log.Printf("[FILTERED] tcp connect dest=%s comm=%s", ip.String(), comm)
+		commLower := strings.ToLower(comm)
+		if _, ok := filterCfg.excludeComms[commLower]; ok {
+			log.Printf("[FILTERED] tcp connect dest=%s comm=%s commLower=%s", ip.String(), comm, commLower)
 			continue
 		}
 
