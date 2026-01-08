@@ -51,7 +51,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: agent
-          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.06
+          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.07
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -67,7 +67,7 @@ spec:
             - name: METRICS_ADDR
               value: "0.0.0.0:9102"
             - name: EXCLUDE_COMMS
-              value: "kubelet"
+              value: "kubelet,vmagent,keda,kube-state-metrics,prometheus,prometheus-node-exporter"
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf

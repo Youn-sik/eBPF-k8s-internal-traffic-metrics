@@ -173,16 +173,28 @@ func main() {
 		}
 
 		raw := record.RawSample
-		addr := binary.BigEndian.Uint32(raw[0:4]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
-		comm := strings.TrimRight(string(bytes.Trim(raw[4:20], "\x00")), "\x00")
+		addr := binary.BigEndian.Uint32(raw[:4]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
+		// null 바이트 이전까지만 comm으로 사용 (null 이후는 초기화되지 않은 쓰레기 데이터)
+		commRaw := raw[4:eventSize] // eventSize(20) - 4 = 16바이트
+		comm := string(commRaw)
+		if idx := bytes.IndexByte(commRaw, 0); idx != -1 {
+			comm = string(commRaw[:idx])
+		}
 
 		ip := make(net.IP, net.IPv4len)      // IPv4 버퍼 생성
 		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
 
-		// 필터링: comm
+		// 필터링: comm (prefix 매칭)
 		commLower := strings.ToLower(comm)
-		if _, ok := filterCfg.excludeComms[commLower]; ok {
-			log.Printf("[FILTERED] tcp connect dest=%s comm=%s commLower=%s", ip.String(), comm, commLower)
+		filtered := false
+		for prefix := range filterCfg.excludeComms {
+			if strings.HasPrefix(commLower, prefix) {
+				log.Printf("[FILTERED] tcp connect dest=%s comm=%s matched=%s", ip.String(), comm, prefix)
+				filtered = true
+				break
+			}
+		}
+		if filtered {
 			continue
 		}
 
