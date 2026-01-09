@@ -116,7 +116,7 @@ static __always_inline void parse_http_request(
     int depth = 0;      // 현재 경로 깊이 (슬래시 개수)
     int path_idx = 0;   // 출력 경로 인덱스
 
-    #pragma unroll  // 루프 언롤링
+    // 경로 문자 복사 루프 (bounded loop - 커널 5.3+에서 자동 검증)
     for (int j = path_start; j < read_len && path_idx < (MAX_PATH_LEN - 2); j++) {
         char c = local_buf[j];
 
