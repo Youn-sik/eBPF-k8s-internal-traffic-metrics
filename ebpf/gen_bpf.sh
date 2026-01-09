@@ -3,16 +3,19 @@
 # Must be run on a Linux host with BTF-enabled kernel (e.g., /sys/kernel/btf/vmlinux present),
 # clang/llvm installed, and bpftool available in PATH.
 #
+# bpf2go generates _bpfel.go (little-endian: amd64, arm64) and _bpfeb.go (big-endian: s390x, ppc64).
+# Go build tags automatically select the correct file at compile time.
+# CO-RE (Compile Once - Run Everywhere) enables runtime adaptation to different kernel versions.
+#
 # Usage:
-#   ARCH=x86 ./gen_bpf.sh        # for x86_64 nodes
-#   ARCH=arm64 ./gen_bpf.sh      # for arm64 nodes
-#   ARCH=x86 ./gen_bpf.sh l4     # L4 only
-#   ARCH=x86 ./gen_bpf.sh l7     # L7 only
+#   ./gen_bpf.sh              # build all (L4 + L7)
+#   ./gen_bpf.sh l4           # L4 only
+#   ./gen_bpf.sh l7           # L7 only
 #
 # Outputs:
-#   ebpf/bpf/vmlinux.h
-#   ebpf/artifacts/<arch>/l4_sender_bpfel.go, l4_sender_bpfeb.go
-#   ebpf/artifacts/<arch>/l7_receiver_bpfel.go, l7_receiver_bpfeb.go
+#   artifacts/<arch>/l4sender_bpfel.go, l4sender_bpfeb.go, *.o
+#   artifacts/<arch>/l7receiver_bpfel.go, l7receiver_bpfeb.go, *.o
+#   artifacts/<arch>/vmlinux.h
 
 set -euo pipefail
 
@@ -20,38 +23,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BPF_DIR="${SCRIPT_DIR}/bpf"
 BUILD_TARGET="${1:-all}"  # all, l4, l7
 
-ARCH_INPUT="${ARCH:-}"
-if [[ -z "${ARCH_INPUT}" ]]; then
-  ARCH_INPUT="$(uname -m)"
-fi
-
-# Artifact directory name mapping
+# Detect host architecture
+ARCH_INPUT="$(uname -m)"
 case "${ARCH_INPUT}" in
   x86_64|amd64|x86|i386|i686)
-    ARTIFACT_ARCH="amd64"
+    ARCH="amd64"
     ;;
   arm64|aarch64)
-    ARTIFACT_ARCH="arm64"
+    ARCH="arm64"
     ;;
   *)
-    ARTIFACT_ARCH="${ARCH_INPUT}"
+    ARCH="${ARCH_INPUT}"
     ;;
 esac
 
-# bpf2go/clang target arch mapping
-case "${ARCH_INPUT}" in
-  x86_64|amd64|x86|i386|i686)
-    TARGET_ARCH="x86"
-    ;;
-  arm64|aarch64)
-    TARGET_ARCH="arm64"
-    ;;
-  *)
-    TARGET_ARCH="${ARCH_INPUT}"
-    ;;
-esac
-
-PKG="${GOPACKAGE:-ebpf}"
+# Package name: main (same as cmd/agent, will be copied there in Dockerfile)
+PKG="main"
 
 # Validate environment
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -75,7 +62,7 @@ if ! command -v bpf2go >/dev/null 2>&1; then
 fi
 
 # Create artifact directory
-ART_DIR="${SCRIPT_DIR}/artifacts/${ARTIFACT_ARCH}"
+ART_DIR="${SCRIPT_DIR}/artifacts/${ARCH}"
 mkdir -p "${ART_DIR}"
 
 # Step 1: Generate vmlinux.h
@@ -84,7 +71,16 @@ bpftool btf dump file /sys/kernel/btf/vmlinux format c > "${BPF_DIR}/vmlinux.h"
 cp "${BPF_DIR}/vmlinux.h" "${ART_DIR}/"
 
 # Common CFLAGS
-CFLAGS="-g -O2 -D__TARGET_ARCH_${TARGET_ARCH}"
+# __TARGET_ARCH_ macro uses kernel naming: x86 for amd64, arm64 for arm64
+case "${ARCH}" in
+  amd64)
+    CLANG_TARGET_ARCH="x86"
+    ;;
+  *)
+    CLANG_TARGET_ARCH="${ARCH}"
+    ;;
+esac
+CFLAGS="-g -O2 -D__TARGET_ARCH_${CLANG_TARGET_ARCH}"
 INCLUDE_FLAGS="-I${BPF_DIR}"
 
 # Step 2: Build L4 Sender (tcp_connect)

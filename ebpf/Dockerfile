@@ -11,15 +11,22 @@ ENV CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} GO111MODULE=on
 
 WORKDIR /src
 
-# 아키텍처별로 미리 생성한 bpf2go 산출물/오브젝트를 복사
-COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/tcpconnect_bpfel.go ./tcpconnect_bpfel.go
-COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/tcpconnect_bpfeb.go ./tcpconnect_bpfeb.go
-COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/tcpconnect_bpfel.o ./tcpconnect_bpfel.o
-COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/tcpconnect_bpfeb.o ./tcpconnect_bpfeb.o
-COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/vmlinux.h ./vmlinux.h
-
-# 나머지 소스
+# 나머지 소스 먼저 복사
 COPY . .
+
+# 아키텍처별로 미리 생성한 bpf2go 산출물을 cmd/agent/에 복사 (package main)
+# bpf2go는 _bpfel (little-endian), _bpfeb (big-endian) 파일 생성
+# Go 빌드 태그가 자동으로 올바른 파일 선택
+# CO-RE: 실행 시점에 BTF를 통해 커널 버전에 맞게 재배치
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l4sender_bpfel.go ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l4sender_bpfeb.go ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l4sender_bpfel.o ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l4sender_bpfeb.o ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l7receiver_bpfel.go ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l7receiver_bpfeb.go ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l7receiver_bpfel.o ./cmd/agent/
+COPY artifacts/${ARTIFACT_ARCH:-${TARGETARCH}}/l7receiver_bpfeb.o ./cmd/agent/
+
 RUN go mod download
 RUN go build -o /out/agent ./cmd/agent
 
