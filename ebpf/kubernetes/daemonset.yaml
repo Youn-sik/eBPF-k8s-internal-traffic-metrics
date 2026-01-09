@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: internal-tcp-watcher
+  name: k8s-ebpf-l4l7-metrics
   namespace: skuber-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: internal-tcp-watcher
+  name: k8s-ebpf-l4l7-metrics
 rules:
   - apiGroups: [""]
     resources: ["services", "endpoints"]
@@ -19,39 +19,39 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: internal-tcp-watcher
+  name: k8s-ebpf-l4l7-metrics
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: internal-tcp-watcher
+  name: k8s-ebpf-l4l7-metrics
 subjects:
   - kind: ServiceAccount
-    name: internal-tcp-watcher
+    name: k8s-ebpf-l4l7-metrics
     namespace: skuber-system
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: internal-tcp-watcher
+  name: k8s-ebpf-l4l7-metrics
   namespace: skuber-system
   labels:
-    app: internal-tcp-watcher
+    app: k8s-ebpf-l4l7-metrics
 spec:
   selector:
     matchLabels:
-      app: internal-tcp-watcher
+      app: k8s-ebpf-l4l7-metrics
   template:
     metadata:
       labels:
-        app: internal-tcp-watcher
+        app: k8s-ebpf-l4l7-metrics
     spec:
-      serviceAccountName: internal-tcp-watcher
+      serviceAccountName: k8s-ebpf-l4l7-metrics
       hostNetwork: true
       hostPID: true
       terminationGracePeriodSeconds: 10
       containers:
         - name: agent
-          image: registry.skuberplus.com/library/internal-tcp-watcher:0.0.07
+          image: registry.skuberplus.com/library/k8s-ebpf-l4l7-metrics:0.0.07
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -68,6 +68,11 @@ spec:
               value: "0.0.0.0:9102"
             - name: EXCLUDE_COMMS
               value: "kubelet,vmagent,keda,kube-state-metrics,prometheus,prometheus-node-exporter"
+            # L7 HTTP 감지 설정
+            - name: ENABLE_L7_HTTP
+              value: "true"
+            - name: FILTER_HEALTHCHECK
+              value: "true"
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf

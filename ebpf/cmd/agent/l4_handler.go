@@ -12,7 +12,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"              // eBPF 링 버퍼 읽기 라이브러리
 	"github.com/prometheus/client_golang/prometheus" // Prometheus 메트릭 라이브러리
 
-	"ebpf-k8s-internal-traffic-metrics/internal/k8smapper" // K8s IP → 메타데이터 매퍼
+	"k8s-ebpf-l4l7-metrics/internal/k8smapper" // K8s IP → 메타데이터 매퍼
 )
 
 // L4Event는 eBPF에서 전송된 L4 아웃바운드 TCP 연결 이벤트를 나타냄

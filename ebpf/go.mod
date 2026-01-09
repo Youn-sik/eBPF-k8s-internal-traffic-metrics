@@ -1,4 +1,4 @@
-module ebpf-k8s-internal-traffic-metrics
+module k8s-ebpf-l4l7-metrics
 
 go 1.25.0
 

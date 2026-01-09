@@ -1,4 +1,4 @@
-PROJECT ?= library/internal-tcp-watcher
+PROJECT ?= library/k8s-ebpf-l4l7-metrics
 VERSION ?= 0.0.01
 REGISTRY ?= registry.skuberplus.com
 IMAGE ?= $(REGISTRY)/$(PROJECT):$(VERSION)
