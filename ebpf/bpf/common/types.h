@@ -20,15 +20,19 @@ struct l4_event {
 // ============================================================================
 
 // accept() 시스템콜 인자 저장용
+// 주의: bpf2go는 포인터 타입을 지원하지 않으므로 __u64로 주소 저장
 struct accept_args_t {
-    int sockfd;
-    struct sockaddr *addr;
+    int sockfd;              // 리스닝 소켓 FD
+    int _pad;                // 패딩 (8바이트 정렬)
+    __u64 addr;              // struct sockaddr* 주소를 __u64로 저장
 };
 
 // read() 시스템콜 인자 저장용
+// 주의: bpf2go는 포인터 타입을 지원하지 않으므로 __u64로 주소 저장
 struct read_args_t {
-    int fd;
-    char *buf;
+    int fd;                  // 파일 디스크립터
+    int _pad;                // 패딩 (8바이트 정렬)
+    __u64 buf;               // char* 버퍼 주소를 __u64로 저장
 };
 
 // 소켓 정보 (accept에서 추출한 클라이언트 정보)
