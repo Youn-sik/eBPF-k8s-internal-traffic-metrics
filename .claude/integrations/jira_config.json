@@ -1,0 +1,45 @@
+{
+  "jira": {
+    "enabled": true,
+    "base_url": "https://wondermove-official.atlassian.net",
+    "project_key": "SKP",
+    "project_id": "10249",
+    "project_name": "Skuber+",
+    "user": {
+      "email": "joker@wondermove.net",
+      "display_name": "joker",
+      "account_id": "712020:7911c59b-65ec-476a-a83f-2edb2e90d7c7"
+    },
+    "issue_types": {
+      "initiative": {
+        "id": "10328",
+        "name": "이니셔티브"
+      },
+      "epic": {
+        "id": "10000",
+        "name": "에픽"
+      },
+      "task": {
+        "id": "10004",
+        "name": "작업"
+      },
+      "subtask": {
+        "id": "10005",
+        "name": "하위 작업"
+      },
+      "bug": {
+        "id": "10032",
+        "name": "버그"
+      }
+    },
+    "worktree_mapping": {
+      "epic": "에픽",
+      "story": "작업",
+      "task": "하위 작업"
+    },
+    "active_version": {
+      "id": "10397",
+      "name": "26.1.1_GA"
+    }
+  }
+}
