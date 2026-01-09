@@ -1,250 +1,311 @@
-package main // 메인 실행 진입점 패키지
+package main
 
 import (
-	"bytes"           // comm 디코딩
-	"context"         // 종료 제어용 컨텍스트
-	"encoding/binary" // 바이트 오더 변환
-	"errors"          // 에러 비교 유틸
-	"log"             // 표준 로그 출력
-	"net"             // IP 타입 변환
-	"net/http"        // 메트릭 HTTP 서버
-	"os"              // 환경변수 읽기
-	"os/signal"       // OS 시그널 수신
-	"path/filepath"   // kubeconfig 경로 결합
-	"strconv"         // 문자열 숫자 변환
-	"strings"         // 필터 파싱
-	"syscall"         // 시그널 상수 제공
-	"time"            // TTL 파싱
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
-	// 엔디안 판별용 포인터 캐스팅
-	ebpfobjs "ebpf-k8s-internal-traffic-metrics" // bpf2go가 생성한 오브젝트 래퍼
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
+	"github.com/cilium/ebpf/rlimit"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/cilium/ebpf/link"                             // eBPF 프로그램을 커널의 특정 훅에 연결하고 연결을 관리하는 패키지
-	"github.com/cilium/ebpf/ringbuf"                          // eBPF 프로그램이 커널에서 발생시킨 이벤트를 User Space 에서 비동기적으로 수신하는 통로
-	"github.com/cilium/ebpf/rlimit"                           // eBPF 프로그램 로딩에 필요한 시스템 자원 제한을 자동으로 설정하는 유틸리티
-	"github.com/prometheus/client_golang/prometheus"          // 메트릭 등록
-	"github.com/prometheus/client_golang/prometheus/promhttp" // /metrics 핸들러
-
-	"ebpf-k8s-internal-traffic-metrics/internal/k8smapper" // K8s 매핑
+	// L4 Sender bpf2go objects (existing TcpConnect artifacts)
+	l4objs "ebpf-k8s-internal-traffic-metrics/artifacts/amd64"
+	"ebpf-k8s-internal-traffic-metrics/internal/k8smapper"
 )
 
-type event struct {
-	Daddr uint32   // 목적지 IPv4 (네트워크 바이트 오더)
-	Comm  [16]byte // 프로세스 comm
-}
-
-const eventSize = 20 // 이벤트 페이로드 크기
+// NOTE: L7 objects will be imported when generated
+// l7objs "ebpf-k8s-internal-traffic-metrics/artifacts/amd64"
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // 로그에 날짜+마이크로초 포함
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM) // SIGINT/SIGTERM 수신 컨텍스트
-	defer stop()                                                                             // 시그널 리스너 정리
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	mode := os.Getenv("MODE") // cluster | local
-	if mode == "" {
-		mode = "cluster"
-	}
+	// ==========================================================================
+	// Configuration
+	// ==========================================================================
 
-	mapperOpts := k8smapper.Options{ // 매퍼 옵션 구성
-		Namespace: os.Getenv("WATCH_NAMESPACE"), // 감시 네임스페이스(없으면 전체)
-	}
-	if ttlStr := os.Getenv("MAPPER_TTL"); ttlStr != "" { // TTL 설정
-		if d, err := time.ParseDuration(ttlStr); err == nil {
-			mapperOpts.TTL = d
-		} else {
-			log.Printf("invalid MAPPER_TTL=%s, using default: %v", ttlStr, err)
-		}
-	}
-	if capStr := os.Getenv("MAPPER_CAPACITY"); capStr != "" { // 용량 설정
-		if v, err := strconv.Atoi(capStr); err == nil && v > 0 {
-			mapperOpts.Capacity = v
-		} else {
-			log.Printf("invalid MAPPER_CAPACITY=%s, using default: %v", capStr, err)
-		}
-	}
+	cfg := loadConfig()
 
-	mapper, err := k8smapper.NewMapper(mapperOpts) // 매퍼 생성
+	log.Printf("[CONFIG] mode=%s, metricsAddr=%s", cfg.Mode, cfg.MetricsAddr)
+	log.Printf("[CONFIG] L4 enabled=%t, L7 enabled=%t", cfg.EnableL4, cfg.EnableL7)
+
+	// ==========================================================================
+	// K8s Mapper
+	// ==========================================================================
+
+	mapper, err := k8smapper.NewMapper(cfg.MapperOpts)
 	if err != nil {
 		log.Fatalf("failed to create mapper: %v", err)
 	}
 
-	// 메트릭 설정
-	metricsAddr := os.Getenv("METRICS_ADDR")
-	if metricsAddr == "" {
-		metricsAddr = "0.0.0.0:9102"
-	}
-	counter := prometheus.NewCounterVec(
+	go func() {
+		var kubeconfigPath string
+		if cfg.Mode == "local" {
+			if home, herr := os.UserHomeDir(); herr == nil {
+				kubeconfigPath = filepath.Join(home, ".kube", "config")
+			}
+		}
+		if runErr := mapper.Run(ctx, cfg.MapperOpts, kubeconfigPath); runErr != nil {
+			log.Fatalf("mapper run failed: %v", runErr)
+		}
+	}()
+
+	// ==========================================================================
+	// Prometheus Metrics
+	// ==========================================================================
+
+	// L4 metric (existing)
+	l4Counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "internal_tcp_attempts_total",
 			Help: "Count of internal TCP connect attempts mapped to K8s Services/Pods",
 		},
 		[]string{"destination_namespace", "destination_service", "destination_pod", "process_comm"},
 	)
-	if err := prometheus.Register(counter); err != nil {
-		// 이미 등록되어 있어도 계속 진행
+	if err := prometheus.Register(l4Counter); err != nil {
 		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-			counter = are.ExistingCollector.(*prometheus.CounterVec)
+			l4Counter = are.ExistingCollector.(*prometheus.CounterVec)
 		} else {
-			log.Fatalf("failed to register metrics: %v", err)
+			log.Fatalf("failed to register L4 metrics: %v", err)
 		}
 	}
 
+	// L7 metric (new)
+	l7Counter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "internal_http_requests_total",
+			Help: "Count of HTTP requests to Pods (healthcheck excluded)",
+		},
+		[]string{
+			"source_ip",
+			"destination_namespace",
+			"destination_service",
+			"destination_pod",
+			"method",
+			"path",
+			"process_comm",
+		},
+	)
+	if err := prometheus.Register(l7Counter); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			l7Counter = are.ExistingCollector.(*prometheus.CounterVec)
+		} else {
+			log.Fatalf("failed to register L7 metrics: %v", err)
+		}
+	}
+
+	// Metrics HTTP server
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	srv := &http.Server{
-		Addr:    metricsAddr,
+		Addr:    cfg.MetricsAddr,
 		Handler: mux,
 	}
 	go func() {
-		log.Printf("metrics server listening on %s", metricsAddr)
+		log.Printf("[METRICS] server listening on %s", cfg.MetricsAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("metrics server failed: %v", err)
 		}
 	}()
 
-	go func() { // 매퍼 실행 고루틴
-		var kubeconfigPath string
-		if mode == "local" { // 로컬 테스트 시 kubeconfig 사용
-			if home, herr := os.UserHomeDir(); herr == nil {
-				kubeconfigPath = filepath.Join(home, ".kube", "config")
-			}
-		}
-		if runErr := mapper.Run(ctx, mapperOpts, kubeconfigPath); runErr != nil {
-			log.Fatalf("mapper run failed: %v", runErr)
-		}
-	}()
+	// ==========================================================================
+	// eBPF Setup
+	// ==========================================================================
 
-	if err := rlimit.RemoveMemlock(); err != nil { // memlock 제한 해제 시도
-		log.Fatalf("failed to adjust memlock rlimit: %v", err) // 실패 시 프로그램 종료
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Fatalf("failed to adjust memlock rlimit: %v", err)
 	}
 
-	var objs ebpfobjs.TcpConnectObjects                                // eBPF 오브젝트 컨테이너
-	if err := ebpfobjs.LoadTcpConnectObjects(&objs, nil); err != nil { // eBPF 오브젝트 로드
-		log.Fatalf("failed to load BPF objects: %v", err) // 로드 실패 시 종료
+	// ==========================================================================
+	// L4 Sender (TCP Connect) - Using existing TcpConnect artifacts
+	// ==========================================================================
+
+	if cfg.EnableL4 {
+		log.Println("[L4] Loading eBPF objects...")
+
+		var objs l4objs.TcpConnectObjects
+		if err := l4objs.LoadTcpConnectObjects(&objs, nil); err != nil {
+			log.Fatalf("[L4] failed to load BPF objects: %v", err)
+		}
+		defer objs.Close()
+
+		kp, err := link.Kprobe("tcp_v4_connect", objs.TcpV4ConnectEnter, nil)
+		if err != nil {
+			log.Fatalf("[L4] failed to attach kprobe: %v", err)
+		}
+		defer kp.Close()
+
+		// Note: existing artifacts use "Events" map name
+		l4Reader, err := ringbuf.NewReader(objs.Events)
+		if err != nil {
+			log.Fatalf("[L4] failed to create ringbuf reader: %v", err)
+		}
+
+		l4Filter := NewL4Filter(cfg.ExcludeComms)
+		l4Handler := NewL4Handler(l4Reader, mapper, l4Counter, l4Filter)
+
+		go func() {
+			<-ctx.Done()
+			l4Handler.Close()
+		}()
+
+		go l4Handler.Run(ctx)
 	}
-	defer objs.Close() // 리소스 해제 예약
 
-	kp, err := link.Kprobe("tcp_v4_connect", objs.TcpV4ConnectEnter, nil) // tcp_v4_connect에 kprobe 부착
-	if err != nil {                                                       // 부착 실패 처리
-		log.Fatalf("failed to attach kprobe: %v", err) // 치명적 오류
+	// ==========================================================================
+	// L7 Receiver (HTTP Trace) - Placeholder for future implementation
+	// ==========================================================================
+
+	if cfg.EnableL7 {
+		log.Println("[L7] L7 HTTP tracing enabled but not yet implemented")
+		log.Println("[L7] Run gen_bpf.sh on Linux to generate L7 eBPF objects")
+
+		// TODO: Uncomment when L7 objects are generated
+		/*
+			log.Println("[L7] Loading eBPF objects...")
+
+			var l7Objs l7objs.L7ReceiverObjects
+			if err := l7objs.LoadL7ReceiverObjects(&l7Objs, nil); err != nil {
+				log.Fatalf("[L7] failed to load BPF objects: %v", err)
+			}
+			defer l7Objs.Close()
+
+			// Attach tracepoints
+			tpAcceptEnter, err := link.Tracepoint("syscalls", "sys_enter_accept4", l7Objs.SysEnterAccept4, nil)
+			if err != nil {
+				log.Fatalf("[L7] failed to attach sys_enter_accept4: %v", err)
+			}
+			defer tpAcceptEnter.Close()
+
+			tpAcceptExit, err := link.Tracepoint("syscalls", "sys_exit_accept4", l7Objs.SysExitAccept4, nil)
+			if err != nil {
+				log.Fatalf("[L7] failed to attach sys_exit_accept4: %v", err)
+			}
+			defer tpAcceptExit.Close()
+
+			tpReadEnter, err := link.Tracepoint("syscalls", "sys_enter_read", l7Objs.SysEnterRead, nil)
+			if err != nil {
+				log.Fatalf("[L7] failed to attach sys_enter_read: %v", err)
+			}
+			defer tpReadEnter.Close()
+
+			tpReadExit, err := link.Tracepoint("syscalls", "sys_exit_read", l7Objs.SysExitRead, nil)
+			if err != nil {
+				log.Fatalf("[L7] failed to attach sys_exit_read: %v", err)
+			}
+			defer tpReadExit.Close()
+
+			tpClose, err := link.Tracepoint("syscalls", "sys_enter_close", l7Objs.SysEnterClose, nil)
+			if err != nil {
+				log.Fatalf("[L7] failed to attach sys_enter_close: %v", err)
+			}
+			defer tpClose.Close()
+
+			l7Reader, err := ringbuf.NewReader(l7Objs.HttpEvents)
+			if err != nil {
+				log.Fatalf("[L7] failed to create ringbuf reader: %v", err)
+			}
+
+			healthFilter := NewHealthCheckFilter(cfg.FilterHealthCheck, cfg.HealthCheckPaths)
+			l7Handler := NewL7Handler(l7Reader, mapper, l7Counter, healthFilter)
+
+			go func() {
+				<-ctx.Done()
+				l7Handler.Close()
+			}()
+
+			go l7Handler.Run(ctx)
+		*/
+		_ = l7Counter // suppress unused warning
 	}
-	defer kp.Close() // kprobe 해제 예약
 
-	rd, err := ringbuf.NewReader(objs.Events) // 링버퍼 리더 생성
-	if err != nil {                           // 리더 생성 실패 처리
-		log.Fatalf("failed to create ringbuf reader: %v", err) // 치명적 오류
+	// ==========================================================================
+	// Wait for shutdown
+	// ==========================================================================
+
+	log.Println("[MAIN] Agent started successfully")
+	<-ctx.Done()
+
+	log.Println("[MAIN] Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+
+	log.Println("[MAIN] Agent stopped")
+}
+
+// ==========================================================================
+// Configuration
+// ==========================================================================
+
+type Config struct {
+	Mode              string
+	MetricsAddr       string
+	MapperOpts        k8smapper.Options
+	EnableL4          bool
+	EnableL7          bool
+	ExcludeComms      string
+	FilterHealthCheck bool
+	HealthCheckPaths  string
+}
+
+func loadConfig() Config {
+	cfg := Config{
+		Mode:              getEnvDefault("MODE", "cluster"),
+		MetricsAddr:       getEnvDefault("METRICS_ADDR", "0.0.0.0:9102"),
+		EnableL4:          getEnvBool("ENABLE_L4", true),
+		EnableL7:          getEnvBool("ENABLE_L7_HTTP", false),
+		ExcludeComms:      os.Getenv("EXCLUDE_COMMS"),
+		FilterHealthCheck: getEnvBool("FILTER_HEALTHCHECK", true),
+		HealthCheckPaths:  os.Getenv("HEALTHCHECK_PATHS"),
 	}
-	defer rd.Close() // 리더 닫기 예약
 
-	log.Println("tcpconnect agent started; waiting for events") // 에이전트 시작 로그
-
-	go func() { // 종료 시 읽기 차단 해제용 고루틴
-		<-ctx.Done() // 시그널 대기
-		rd.Close()   // 리더 닫아 Read 해제
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
-	filterCfg := loadFilterConfig()
-
-	// 필터 설정 로그 출력
-	excludeCommsList := make([]string, 0, len(filterCfg.excludeComms))
-	for k := range filterCfg.excludeComms {
-		excludeCommsList = append(excludeCommsList, k)
+	// Mapper options
+	cfg.MapperOpts = k8smapper.Options{
+		Namespace: os.Getenv("WATCH_NAMESPACE"),
 	}
-	log.Printf("[CONFIG] excludeComms=%v (count=%d)", excludeCommsList, len(excludeCommsList))
 
-	for {
-		record, err := rd.Read() // 링버퍼에서 이벤트 읽기
-		if err != nil {          // 읽기 실패 처리
-			if errors.Is(err, ringbuf.ErrClosed) { // 리더가 닫힌 경우
-				log.Println("ringbuf reader closed; exiting") // 종료 로그
-				return                                        // 프로그램 종료
-			}
-			log.Printf("ringbuf read error: %v", err) // 기타 읽기 오류 기록
-			continue                                  // 다음 이벤트로 진행
-		}
-
-		if len(record.RawSample) < eventSize { // 페이로드 길이 검사
-			log.Printf("ringbuf decode error: short sample (%d bytes, want %d)", len(record.RawSample), eventSize) // 짧은 샘플 오류
-			continue                                                                                               // 다음 이벤트
-		}
-
-		raw := record.RawSample
-		addr := binary.BigEndian.Uint32(raw[:4]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
-		// null 바이트 이전까지만 comm으로 사용 (null 이후는 초기화되지 않은 쓰레기 데이터)
-		commRaw := raw[4:eventSize] // eventSize(20) - 4 = 16바이트
-		comm := string(commRaw)
-		if idx := bytes.IndexByte(commRaw, 0); idx != -1 {
-			comm = string(commRaw[:idx])
-		}
-
-		ip := make(net.IP, net.IPv4len)      // IPv4 버퍼 생성
-		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
-
-		// 필터링: comm (prefix 매칭)
-		commLower := strings.ToLower(comm)
-		filtered := false
-		for prefix := range filterCfg.excludeComms {
-			if strings.HasPrefix(commLower, prefix) {
-				log.Printf("[FILTERED] tcp connect dest=%s comm=%s matched=%s", ip.String(), comm, prefix)
-				filtered = true
-				break
-			}
-		}
-		if filtered {
-			continue
-		}
-
-		if meta, ok := mapper.Lookup(ip.String()); ok { // 매핑 성공 시 메타 포함
-			ns := meta.Namespace
-			svc := meta.Service
-			pod := meta.Pod
-			if ns == "" {
-				ns = "unknown"
-			}
-			if svc == "" {
-				svc = "unknown"
-			}
-			if pod == "" {
-				pod = "unknown"
-			}
-
-			counter.WithLabelValues(ns, svc, pod, comm).Inc()
-			log.Printf("[COUNTED] tcp connect dest=%s ns=%s svc=%s pod=%s comm=%s", ip.String(), ns, svc, pod, comm)
+	if ttlStr := os.Getenv("MAPPER_TTL"); ttlStr != "" {
+		if d, err := time.ParseDuration(ttlStr); err == nil {
+			cfg.MapperOpts.TTL = d
 		} else {
-			log.Printf("[UNMAPPED] tcp connect dest=%s comm=%s", ip.String(), comm) // 매핑 실패 로그
+			log.Printf("invalid MAPPER_TTL=%s, using default: %v", ttlStr, err)
 		}
 	}
-}
 
-type filterConfig struct {
-	excludeComms map[string]struct{}
-}
-
-func loadFilterConfig() filterConfig {
-	cfg := filterConfig{
-		excludeComms: make(map[string]struct{}),
+	if capStr := os.Getenv("MAPPER_CAPACITY"); capStr != "" {
+		if v, err := strconv.Atoi(capStr); err == nil && v > 0 {
+			cfg.MapperOpts.Capacity = v
+		} else {
+			log.Printf("invalid MAPPER_CAPACITY=%s, using default: %v", capStr, err)
+		}
 	}
-
-	// 기본 kubelet 제외
-	cfg.excludeComms["kubelet"] = struct{}{}
-
-	appendStringSet(os.Getenv("EXCLUDE_COMMS"), func(s string) {
-		cfg.excludeComms[strings.ToLower(s)] = struct{}{}
-	})
 
 	return cfg
 }
 
-func appendStringSet(raw string, add func(string)) {
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		add(part)
+func getEnvDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
+	return defaultVal
+}
+
+func getEnvBool(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	return v == "true" || v == "1" || v == "yes"
 }
